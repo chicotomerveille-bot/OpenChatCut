@@ -2,7 +2,9 @@
 // t()/tData() now read a table that may not be loaded yet. This pins the lookup
 // semantics that were previously inlined in locale.ts, per language:
 //   t:     zh → key · en → EN · it → IT then EN · ru → RU only (no EN fallback)
+//          · fr → FR then EN (French ships screen by screen)
 //   tData: zh → ZH_DATA · en → EN_DATA · it → IT_DATA then EN_DATA · ru → EN_DATA
+//          · fr → EN_DATA (no French data names yet)
 // and the "never go blank" contract while a dictionary is still in flight.
 // npx tsx src/i18n/dictRegistry.verify.ts
 import assert from 'node:assert/strict';
@@ -20,6 +22,7 @@ const { ensureLocaleDict, setLocale, t, tData } = await import('./locale.ts');
 const { localeDicts } = await import('./dictRegistry.ts');
 const { EN } = await import('./dict/en');
 const { IT } = await import('./dict/it');
+const { FR } = await import('./dict/fr');
 const { RU } = await import('./dict/ru');
 const { ZH_DATA } = await import('./dict/zh');
 const EN_DATA = (await import('./dict/en/templates-data')).default;
@@ -68,6 +71,18 @@ function onlyIn(has: Record<string, string>, lacks: Record<string, string>): str
   // name lands, tData() must already resolve it rather than show Chinese.
   assert.equal(localeDicts('it').dataFallback, EN_DATA,
     'it is wired to fall back to EN_DATA for data names');
+}
+
+// ── fr: same English fallback as it, and no Chinese leak ────────────────────
+{
+  setLocale('fr');
+  await ensureLocaleDict('fr');
+  const french = Object.keys(FR)[0]!;
+  assert.equal(t(french), FR[french], 'fr reads the French dictionary');
+  const englishOnly = onlyIn(EN, FR);
+  assert.equal(t(englishOnly), EN[englishOnly], 'fr falls back to English, not to Chinese');
+  const dataKey = Object.keys(EN_DATA)[0]!;
+  assert.equal(tData(dataKey), EN_DATA[dataKey], 'fr data names read EN_DATA');
 }
 
 // ── ru: no English fallback for UI copy, but EN_DATA for data names ──────────
