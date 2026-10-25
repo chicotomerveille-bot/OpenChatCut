@@ -1,5 +1,12 @@
 // Italian translations for the external agent (MCP) guide.
 export default {
+  '配置写在 ~/.config/opencode/opencode.jsonc，复制 JSON 后粘贴到 mcp 字段。': 'La configurazione vive in ~/.config/opencode/opencode.jsonc: incolla questo JSON nel campo mcp.',
+  '写入 ~/.gemini/settings.json；首次在项目中使用需执行 /trust。': 'Scrive ~/.gemini/settings.json; la prima volta esegui /trust nella cartella.',
+  '写入 Cline 的 cline_mcp_settings.json，CLI 与 VS Code 扩展都覆盖。': 'Scrive cline_mcp_settings.json di Cline, sia per la CLI sia per l’estensione VS Code.',
+  '写入 ~/.openclaw/openclaw.json 的 mcp.servers。': 'Scrive mcp.servers in ~/.openclaw/openclaw.json.',
+  '写入 VS Code 用户目录的 mcp.json，供 Copilot Chat 使用。': 'Scrive mcp.json nella cartella utente di VS Code per Copilot Chat.',
+  '令牌已失效，请重新连接': 'Token scaduto — riconnetti',
+  '重新连接': 'Riconnetti',
   '外部 Agent 接入 (MCP)': 'Accesso Agent esterno (MCP)',
   'OpenChatCut 暴露一个 Streamable HTTP MCP 端点。Claude Code / Codex / Cursor 等外部 Agent 接入后,与内置 Agent 共用同一套编辑工具,可直接读写当前工程。': 'OpenChatCut espone un endpoint MCP HTTP streamable. Agent esterni come Claude Code, Codex e Cursor condividono gli stessi strumenti dell’Agent integrato e possono leggere/modificare il progetto corrente.',
   '端点地址': 'Endpoint',
