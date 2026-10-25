@@ -14,6 +14,7 @@ import {
 import { handleMcpRequest, mcpTools } from '../external-agent/mcp.ts';
 import { exportJianyingDraft } from '../external-agent/jianying-export.ts';
 import { CONNECT_CLIENTS, connectExternalClient } from '../external-agent/client-connect.ts';
+import { readExternalClientStatus } from '../external-agent/client-status.ts';
 import { claimBrowserProjectOwnership } from '../external-agent/project-edit-ownership.ts';
 import {
   EDITOR_BOOTSTRAP_HEADER,
@@ -47,8 +48,6 @@ const bridgeOperations: BridgeOperations = {
   touchEditor,
   mcpTools,
 };
-
-
 
 
 
@@ -104,6 +103,13 @@ export async function handleExternalAgentBridge(
   }
   if (write && !isJsonRequest(req)) {
     sendBridgeJson(res, 415, { error: 'editor bridge writes require JSON' });
+    return;
+  }
+  // Which clients already carry this endpoint and token. Read-only: the panel
+  // needs it to show real state instead of a Connect button that is already done.
+  if (!write && url.pathname === '/client-status') {
+    const clients = await readExternalClientStatus(`${requestBaseUrl(req)}/api/external-mcp/mcp`, externalMcpToken());
+    sendBridgeJson(res, 200, { clients });
     return;
   }
   if (write && url.pathname === '/jianying-export') {

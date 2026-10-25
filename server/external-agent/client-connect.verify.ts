@@ -241,10 +241,88 @@ async function main(): Promise<void> {
     const badToken = await connectExternalClient('cursor', ENDPOINT, "'; rm -rf ~", { baseDir: home });
     assert.equal(badToken.ok, false);
     if (!badToken.ok) assert.equal(badToken.error, 'invalid-token');
+    // 14. VS Code: user-scope mcp.json under the application-data tree, keyed by
+    //     `servers` rather than `mcpServers`. Existing entries and unrelated
+    //     settings survive a reconnect.
+    const appData = path.join(home, 'AppData/Roaming');
+    const vscode = await connectExternalClient('vscode', ENDPOINT, TOKEN, {
+      baseDir: home, platform: 'win32', appDataDir: appData,
+    });
+    assert.equal(vscode.ok, true);
+    if (vscode.ok) assert.deepEqual(vscode.paths, ['~/AppData/Roaming/Code/User/mcp.json']);
+    const vscodeFile = path.join(appData, 'Code/User/mcp.json');
+    const vscodeConfig = JSON.parse(await readFile(vscodeFile, 'utf8'));
+    assert.equal(vscodeConfig.servers.openchatcut.type, 'http');
+    assert.equal(vscodeConfig.servers.openchatcut.url, ENDPOINT);
+    assert.equal(vscodeConfig.servers.openchatcut.headers.Authorization, `Bearer ${TOKEN}`);
+    await writeFile(vscodeFile, JSON.stringify({ servers: { keep: { command: 'keep' } }, theme: 'dark' }, null, 2));
+    const vscodeAgain = await connectExternalClient('vscode', ENDPOINT, TOKEN, {
+      baseDir: home, platform: 'win32', appDataDir: appData,
+    });
+    assert.equal(vscodeAgain.ok, true);
+    const vscodeMerged = JSON.parse(await readFile(vscodeFile, 'utf8'));
+    assert.deepEqual(vscodeMerged.servers.keep, { command: 'keep' }, 'unrelated server preserved');
+    assert.equal(vscodeMerged.theme, 'dark', 'unrelated settings preserved');
+
+    // 15. Gemini CLI: ~/.gemini/settings.json keeps its http entry beside the
+    //     servers already registered there.
+    await mkdir(path.join(home, '.gemini'), { recursive: true });
+    await writeFile(
+      path.join(home, '.gemini/settings.json'),
+      JSON.stringify({ mcpServers: { keep: { command: 'gemini-keep' } } }, null, 2),
+    );
+    const gemini = await connectExternalClient('gemini', ENDPOINT, TOKEN, { baseDir: home });
+    assert.equal(gemini.ok, true);
+    const geminiConfig = JSON.parse(await readFile(path.join(home, '.gemini/settings.json'), 'utf8'));
+    assert.deepEqual(geminiConfig.mcpServers.keep, { command: 'gemini-keep' });
+    assert.equal(geminiConfig.mcpServers.openchatcut.url, ENDPOINT);
+    assert.equal(geminiConfig.mcpServers.openchatcut.type, 'http');
+
+    // 16. Cline: the CLI settings file always; the VS Code extension copy only
+    //     once the extension has created its globalStorage directory.
+    const cline = await connectExternalClient('cline', ENDPOINT, TOKEN, { baseDir: home, platform: 'win32', appDataDir: appData });
+    assert.equal(cline.ok, true);
+    if (cline.ok) assert.deepEqual(cline.paths, ['~/.cline/data/settings/cline_mcp_settings.json']);
+    const clineConfig = JSON.parse(await readFile(path.join(home, '.cline/data/settings/cline_mcp_settings.json'), 'utf8'));
+    assert.deepEqual(clineConfig.mcpServers.openchatcut.transport, {
+      type: 'streamableHttp',
+      url: ENDPOINT,
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const clineExtension = path.join(appData, 'Code/User/globalStorage/saoudrizwan.claude-dev/settings');
+    await mkdir(clineExtension, { recursive: true });
+    const clineBoth = await connectExternalClient('cline', ENDPOINT, TOKEN, { baseDir: home, platform: 'win32', appDataDir: appData });
+    assert.equal(clineBoth.ok, true);
+    if (clineBoth.ok) assert.equal(clineBoth.paths.length, 2, 'both installed Cline homes are written');
+    const clineExtensionConfig = JSON.parse(await readFile(path.join(clineExtension, 'cline_mcp_settings.json'), 'utf8'));
+    assert.equal(clineExtensionConfig.mcpServers.openchatcut.transport.url, ENDPOINT);
+
+    // 17. OpenClaw: nested mcp.servers; everything else in the file survives.
+    await mkdir(path.join(home, '.openclaw'), { recursive: true });
+    await writeFile(path.join(home, '.openclaw/openclaw.json'), JSON.stringify({
+      gateway: { mode: 'local' },
+      mcp: { apps: { enabled: true }, servers: { filmcraft: { command: 'filmcraft' } } },
+    }, null, 2));
+    const openclaw = await connectExternalClient('openclaw', ENDPOINT, TOKEN, { baseDir: home });
+    assert.equal(openclaw.ok, true);
+    const openclawConfig = JSON.parse(await readFile(path.join(home, '.openclaw/openclaw.json'), 'utf8'));
+    assert.equal(openclawConfig.gateway.mode, 'local');
+    assert.equal(openclawConfig.mcp.apps.enabled, true);
+    assert.deepEqual(openclawConfig.mcp.servers.filmcraft, { command: 'filmcraft' });
+    assert.equal(openclawConfig.mcp.servers.openchatcut.transport, 'streamable-http');
+    assert.equal(openclawConfig.mcp.servers.openchatcut.url, ENDPOINT);
+
+    // 18. A nested server map that is not an object is refused instead of
+    //     replaced, so a hand-edited file is never silently destroyed.
+    await writeFile(path.join(home, '.openclaw/openclaw.json'), JSON.stringify({ mcp: { servers: [] } }));
+    const openclawBroken = await connectExternalClient('openclaw', ENDPOINT, TOKEN, { baseDir: home });
+    assert.equal(openclawBroken.ok, false);
+    if (!openclawBroken.ok) assert.equal(openclawBroken.error, 'config-parse-error');
+    assert.deepEqual(JSON.parse(await readFile(path.join(home, '.openclaw/openclaw.json'), 'utf8')), { mcp: { servers: [] } });
   } finally {
     await rm(home, { recursive: true, force: true });
   }
-  console.log('✓ client-connect: merges idempotent, broken JSON refused, codex CLI + token saved per platform');
+  console.log('✓ client-connect: merges idempotent, broken JSON refused, codex CLI + token saved per platform, five more client shapes');
 }
 
 void main();

@@ -10,7 +10,17 @@ import path from 'node:path';
 import { codexCommand } from '../codex/command.ts';
 import { resolveCodexCli } from '../codex/installation.ts';
 
-export const CONNECT_CLIENTS = ['claude', 'codex', 'cursor', 'antigravity', 'qoder'] as const;
+export const CONNECT_CLIENTS = [
+  'claude',
+  'codex',
+  'cursor',
+  'antigravity',
+  'qoder',
+  'gemini',
+  'vscode',
+  'cline',
+  'openclaw',
+] as const;
 export type ConnectClient = (typeof CONNECT_CLIENTS)[number];
 /** Clients whose MCP servers live in a mergeable JSON config file. Codex is
  *  driven through its own CLI and keeps a TOML config we do not parse. */
@@ -38,8 +48,14 @@ export interface ClientConnectOptions {
   baseDir?: string;
   /** Codex CLI override (tests inject a stub here). Defaults to auto-detection. */
   codexBin?: string;
-  /** Platform whose CLI lookup and token storage apply. Defaults to process.platform. */
+  /** Platform whose CLI lookup, token storage and app-data root apply. Defaults
+   *  to process.platform. */
   platform?: NodeJS.Platform;
+  /** Stands in for the platform's application-data directory (Windows
+   *  %APPDATA%, macOS Library/Application Support, Linux ~/.config): VS Code and
+   *  its extensions keep user scope there. Injectable so tests never read the
+   *  real one. */
+  appDataDir?: string;
   /** Runs every child process (tests record them instead). Defaults to spawn. */
   runCommand?: ConnectCommandRunner;
   /** Codex CLI lookup on Windows (tests stub it). Defaults to resolveCodexCli(). */
@@ -68,9 +84,17 @@ const WINDOWS_SAVE_TOKEN_SCRIPT = [
   `if ([Environment]::GetEnvironmentVariable('${TOKEN_ENV_VAR}', 'User') -cne $token) { exit 3 }`,
 ].join('; ');
 
-function displayPath(baseDir: string, file: string): string {
+/** Home-relative path for display, absolute when the file lives outside it. */
+export function displayClientPath(baseDir: string, file: string): string {
   const rel = path.relative(baseDir, file);
   return rel.startsWith('..') ? file : `~/${rel.split(path.sep).join('/')}`;
+}
+
+/** One config file a client reads, plus the keys from the file root down to its
+ *  server map (`['mcpServers']`, `['servers']`, `['mcp', 'servers']`). */
+export interface ClientConfigTarget {
+  file: string;
+  serverPath: readonly [string, ...string[]];
 }
 
 async function writeAtomic(file: string, text: string): Promise<void> {
@@ -82,9 +106,13 @@ async function writeAtomic(file: string, text: string): Promise<void> {
 
 type MergeFailure = { ok: false; error: 'config-parse-error' | 'config-write-error'; detail?: string };
 
+/** Merge the server map at `serverPath`, creating intermediate objects. Every
+ *  level is validated first, so a hand-edited `"mcp": []` is refused instead of
+ *  being silently replaced by an object. */
 async function mergeJsonConfig(
   file: string,
-  build: (root: Record<string, unknown>) => void,
+  serverPath: ClientConfigTarget['serverPath'],
+  build: (servers: Record<string, unknown>) => void,
 ): Promise<{ ok: true } | MergeFailure> {
   let root: Record<string, unknown> = {};
   try {
@@ -101,11 +129,29 @@ async function mergeJsonConfig(
       return { ok: false, error: 'config-parse-error', detail: file };
     }
   }
-  const servers = root.mcpServers;
-  if (servers !== undefined && (typeof servers !== 'object' || servers === null || Array.isArray(servers))) {
-    return { ok: false, error: 'config-parse-error', detail: 'mcpServers' };
+  let parent: Record<string, unknown> = root;
+  for (const key of serverPath.slice(0, -1)) {
+    const current = parent[key];
+    if (current === undefined) {
+      const created: Record<string, unknown> = {};
+      parent[key] = created;
+      parent = created;
+      continue;
+    }
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) {
+      return { ok: false, error: 'config-parse-error', detail: key };
+    }
+    parent = current as Record<string, unknown>;
   }
-  build(root);
+  const leaf = serverPath[serverPath.length - 1] ?? '';
+  if (!leaf) return { ok: false, error: 'config-parse-error', detail: 'serverPath' };
+  const servers = parent[leaf];
+  if (servers !== undefined && (typeof servers !== 'object' || servers === null || Array.isArray(servers))) {
+    return { ok: false, error: 'config-parse-error', detail: leaf };
+  }
+  const map = (servers as Record<string, unknown> | undefined) ?? {};
+  parent[leaf] = map;
+  build(map);
   try {
     await writeAtomic(file, `${JSON.stringify(root, null, 2)}\n`);
   } catch (error) {
@@ -114,44 +160,100 @@ async function mergeJsonConfig(
   return { ok: true };
 }
 
-function httpEntry(endpoint: string, token: string): Record<string, unknown> {
-  return { type: 'http', url: endpoint, headers: { Authorization: `Bearer ${token}` } };
+async function isDirectory(dir: string): Promise<boolean> {
+  try {
+    return (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
-async function connectJsonClients(
-  files: readonly string[],
-  entry: Record<string, unknown>,
-): Promise<{ ok: true; paths: string[] } | MergeFailure> {
-  const written: string[] = [];
-  for (const file of files) {
-    const result = await mergeJsonConfig(file, (root) => {
-      const servers = (root.mcpServers as Record<string, unknown> | undefined) ?? {};
-      servers.openchatcut = entry;
-      root.mcpServers = servers;
-    });
-    if (!result.ok) return result;
-    written.push(file);
-  }
-  return { ok: true, paths: written };
+/** Windows %APPDATA%, macOS Library/Application Support, Linux ~/.config. */
+function appDataRoot(baseDir: string, platform: NodeJS.Platform, options: ClientConnectOptions): string {
+  if (options.appDataDir) return options.appDataDir;
+  if (platform === 'win32') return process.env.APPDATA ?? path.join(baseDir, 'AppData', 'Roaming');
+  if (platform === 'darwin') return path.join(baseDir, 'Library', 'Application Support');
+  return path.join(baseDir, '.config');
+}
+
+/** VS Code keeps user-scope settings (and extensions' globalStorage) under the
+ *  application-data tree rather than the home directory itself. */
+function vsCodeUserDir(baseDir: string, platform: NodeJS.Platform, options: ClientConnectOptions): string {
+  return path.join(appDataRoot(baseDir, platform, options), 'Code', 'User');
 }
 
 /** Config files this client reads. Qoder ships an international and a China
  *  build that keep the same settings file under `.qoder` or `.qoder-cn`, and
  *  only the installed one is meaningful, so an absent sibling is skipped; when
- *  neither exists yet the documented `.qoder` path is created. */
-async function jsonClientFiles(client: JsonClient, baseDir: string): Promise<string[]> {
-  if (client === 'claude') return [path.join(baseDir, '.claude.json')];
-  if (client === 'cursor') return [path.join(baseDir, '.cursor', 'mcp.json')];
-  if (client === 'antigravity') return [path.join(baseDir, '.gemini', 'antigravity', 'mcp_config.json')];
+ *  neither exists yet the documented `.qoder` path is created. Cline does the
+ *  same across its CLI home and the VS Code extension's globalStorage copy.
+ *  Exported so the read-only status check inspects exactly the files the writer
+ *  touches. */
+export async function clientConfigTargets(
+  client: JsonClient,
+  baseDir: string,
+  options: ClientConnectOptions = {},
+): Promise<ClientConfigTarget[]> {
+  const platform = options.platform ?? process.platform;
+  const mcpServers = (file: string): ClientConfigTarget[] => [{ file, serverPath: ['mcpServers'] }];
+  if (client === 'claude') return mcpServers(path.join(baseDir, '.claude.json'));
+  if (client === 'cursor') return mcpServers(path.join(baseDir, '.cursor', 'mcp.json'));
+  if (client === 'antigravity') return mcpServers(path.join(baseDir, '.gemini', 'antigravity', 'mcp_config.json'));
+  if (client === 'gemini') return mcpServers(path.join(baseDir, '.gemini', 'settings.json'));
+  if (client === 'vscode') return [{ file: path.join(vsCodeUserDir(baseDir, platform, options), 'mcp.json'), serverPath: ['servers'] }];
+  if (client === 'openclaw') return [{ file: path.join(baseDir, '.openclaw', 'openclaw.json'), serverPath: ['mcp', 'servers'] }];
+  if (client === 'cline') {
+    const targets: ClientConfigTarget[] = [{
+      file: path.join(baseDir, '.cline', 'data', 'settings', 'cline_mcp_settings.json'),
+      serverPath: ['mcpServers'],
+    }];
+    // The VS Code extension keeps its own copy. Only the installed build has
+    // that directory, so writing it unconditionally would leave a file the
+    // extension never reads.
+    const extension = path.join(
+      vsCodeUserDir(baseDir, platform, options),
+      'globalStorage',
+      'saoudrizwan.claude-dev',
+      'settings',
+      'cline_mcp_settings.json',
+    );
+    if (await isDirectory(path.dirname(extension))) targets.push({ file: extension, serverPath: ['mcpServers'] });
+    return targets;
+  }
   const homes: string[] = [];
   for (const dir of ['.qoder', '.qoder-cn']) {
-    try {
-      if ((await stat(path.join(baseDir, dir))).isDirectory()) homes.push(dir);
-    } catch {
-      /* that build is not installed */
-    }
+    if (await isDirectory(path.join(baseDir, dir))) homes.push(dir);
   }
-  return (homes.length ? homes : ['.qoder']).map((dir) => path.join(baseDir, dir, 'settings.json'));
+  return (homes.length ? homes : ['.qoder']).map((dir) => ({
+    file: path.join(baseDir, dir, 'settings.json'),
+    serverPath: ['mcpServers'] as const,
+  }));
+}
+
+/** The server entry each client's own schema accepts. They differ by one field
+ *  at a time, so the shape is spelled out rather than configurable. */
+function clientEntry(client: JsonClient, endpoint: string, token: string): Record<string, unknown> {
+  const headers = { Authorization: `Bearer ${token}` };
+  if (client === 'antigravity') return { httpUrl: endpoint, headers };
+  if (client === 'cline') return { transport: { type: 'streamableHttp', url: endpoint, headers } };
+  if (client === 'openclaw') return { url: endpoint, transport: 'streamable-http', headers };
+  if (client === 'gemini') return { url: endpoint, type: 'http', headers };
+  return { type: 'http', url: endpoint, headers };
+}
+
+async function connectJsonClients(
+  targets: readonly ClientConfigTarget[],
+  entry: Record<string, unknown>,
+): Promise<{ ok: true; paths: string[] } | MergeFailure> {
+  const written: string[] = [];
+  for (const target of targets) {
+    const result = await mergeJsonConfig(target.file, target.serverPath, (servers) => {
+      servers.openchatcut = entry;
+    });
+    if (!result.ok) return result;
+    written.push(target.file);
+  }
+  return { ok: true, paths: written };
 }
 
 /** No shell and no input: Windows PowerShell waits for EOF on an open stdin
@@ -216,7 +318,7 @@ async function saveTokenToZshrc(token: string, baseDir: string, codexConfig: str
   } catch (error) {
     return { ok: false, error: 'config-write-error', detail: error instanceof Error ? error.message : String(error) };
   }
-  return { ok: true, paths: [codexConfig, displayPath(baseDir, zshrc)] };
+  return { ok: true, paths: [codexConfig, displayClientPath(baseDir, zshrc)] };
 }
 
 /** Windows: the token becomes a user environment variable. See WINDOWS_SAVE_TOKEN_SCRIPT. */
@@ -244,7 +346,7 @@ async function connectCodex(endpoint: string, token: string, baseDir: string, op
   for (const bin of await codexCandidates(baseDir, platform, options)) {
     const { code, stderr } = await run({ ...codexCommand(bin, args, platform), env });
     if (code === 0) {
-      const codexConfig = displayPath(baseDir, path.join(baseDir, '.codex', 'config.toml'));
+      const codexConfig = displayClientPath(baseDir, path.join(baseDir, '.codex', 'config.toml'));
       return platform === 'win32'
         ? saveTokenToWindowsUserEnv(token, run, codexConfig)
         : saveTokenToZshrc(token, baseDir, codexConfig);
@@ -269,11 +371,8 @@ export async function connectExternalClient(
   }
   const baseDir = options.baseDir ?? homedir();
   if (selected === 'codex') return connectCodex(endpoint, token, baseDir, options);
-  const files = await jsonClientFiles(selected, baseDir);
-  const entry = selected === 'antigravity'
-    ? { httpUrl: endpoint, headers: { Authorization: `Bearer ${token}` } }
-    : httpEntry(endpoint, token);
-  const result = await connectJsonClients(files, entry);
+  const targets = await clientConfigTargets(selected, baseDir, options);
+  const result = await connectJsonClients(targets, clientEntry(selected, endpoint, token));
   if (!result.ok) return result;
-  return { ok: true, paths: result.paths.map((file) => displayPath(baseDir, file)) };
+  return { ok: true, paths: result.paths.map((file) => displayClientPath(baseDir, file)) };
 }
