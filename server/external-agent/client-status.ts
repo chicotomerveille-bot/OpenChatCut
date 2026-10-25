@@ -171,6 +171,11 @@ function codexView(text: string): EntryView | null {
     if (bearer) view.token = bearer[1];
     const env = /^bearer_token_env_var\s*=\s*"([^"]*)"/.exec(line);
     if (env) view.envToken = env[1] === 'OPENCHATCUT_MCP_TOKEN';
+    // Codex also accepts the token as a literal header on an inline table, which
+    // is what `codex mcp add --url … --header …` writes and what the panel's own
+    // snippet produces. Missing it made a working setup read as a stale token.
+    const header = /"Authorization"\s*=\s*"Bearer\s+([^"]*)"/i.exec(line);
+    if (header) view.token = header[1];
   }
   return found ? view : null;
 }
