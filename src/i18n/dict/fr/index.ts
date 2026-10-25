@@ -4,9 +4,10 @@
 // entry for that key (dictRegistry.fetchDicts('fr')), never to Chinese.
 import editor from './editor';
 import review from './review';
+import timeline from './timeline';
 import topbar from './topbar';
 
 export const FR: Record<string, string> = Object.assign(
   {},
-  editor, review, topbar,
+  editor, review, timeline, topbar,
 );
