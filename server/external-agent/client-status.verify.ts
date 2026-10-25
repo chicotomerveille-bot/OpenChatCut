@@ -113,6 +113,18 @@ async function main(): Promise<void> {
     await mkdir(path.join(home, '.gemini'), { recursive: true });
     await writeFile(path.join(home, '.gemini', 'settings.json'), '{ "mcpServers": { "other": { "command": "x" } } }');
     assert.equal(await statusOf(home, 'gemini'), 'absent');
+
+    // 11. Codex also accepts the bearer token as a literal header on an inline
+    //     table — what `codex mcp add --header` writes. That token counts: a
+    //     working setup must not read as stale.
+    await writeFile(path.join(home, '.codex', 'config.toml'), [
+      '[mcp_servers.openchatcut]',
+      `url = "${ENDPOINT}"`,
+      `http_headers = { "Authorization" = "Bearer ${TOKEN}", "x-openchatcut-mcp-client" = "codex" }`,
+      '',
+    ].join('\n'));
+    assert.equal(await statusOf(home, 'codex'), 'configured');
+    assert.equal(await statusOf(home, 'codex', {}, ENDPOINT, 'tok_ROTATED'), 'stale-token', 'a literal header token is compared');
   } finally {
     await rm(home, { recursive: true, force: true });
   }
